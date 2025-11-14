@@ -1,0 +1,17 @@
+# RayTracer
+
+##  Requirements
+
+- g++ (C++17 support)
+- GNU Make
+- stb_image (header-only)
+- tinyxml2 (for XML parsing)
+
+## Change Includes and scenes path as needed
+##  Build
+
+make
+
+##  Run
+
+make run

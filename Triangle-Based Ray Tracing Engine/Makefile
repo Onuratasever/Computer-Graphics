@@ -1,22 +1,31 @@
-CXX      := g++
-SRC_DIR  := src
-INC_DIR  := include
-LIB_DIR  := C:/Users/onur/Downloads/glfw-master/glfw-master/build/src
+# === AYARLAR ===
+CXX = g++
+INCLUDES = -Iinclude     
+CXXFLAGS = -std=c++17 -Wall -Wextra -O3 $(INCLUDES)
+LDFLAGS = -ltinyxml2                     # <-- BUNU EKLEDİK
+TARGET = raytracer
 
-SRCS := $(SRC_DIR)/main.cpp \
-        $(SRC_DIR)/glad.c    \
-        $(SRC_DIR)/Shader.cpp
+# === KAYNAK DOSYALARI ===
+SRCS = $(wildcard *.cpp)
+OBJS = $(SRCS:.cpp=.o)
 
-# Eğer Camera.cpp varsa:
-# SRCS += $(SRC_DIR)/Camera.cpp
+# === DEFAULT HEDEF ===
+all: $(TARGET)
 
-OUT  := app.exe
+# === LİNKLEME ===
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-CXXFLAGS := -std=c++17 -I$(INC_DIR) -Wall -g
-LDFLAGS  := -L$(LIB_DIR) -lglfw3 -lopengl32 -lgdi32
+# === DERLEME ===
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(OUT): $(SRCS)
-	$(CXX) $(CXXFLAGS) $^ $(LDFLAGS) -o $@
+# === ÇALIŞTIR ===
+run: $(TARGET)
+	./$(TARGET)
 
+# === TEMİZLEME ===
 clean:
-	del /Q $(OUT)
+	rm -f *.o $(TARGET)
+
+.PHONY: all clean run

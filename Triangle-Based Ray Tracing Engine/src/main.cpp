@@ -1,420 +1,526 @@
-/************************  main.cpp  ************************/
-#include <glad/glad.h>
-#include <GLFW/glfw3.h>
-
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-
 #include <iostream>
-
-#include "Shader.h"
+#include "ImageWriter.h"
+#include "Image.h"
+#include <string>
 #include "Camera.h"
-#include "geometry.h"   // cubeVAO(), planeVAO()
-#include "texture.h"    // loadTexture()
+#include "Scene.h"
+#include "XMLParser.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "./Include/stb_image.h"
+#include <bits/algorithmfwd.h>
+#include <thread>
+#include <chrono>
 
-// --------------------------- globals
-GLFWwindow* window;
+using namespace std;
 
-const unsigned int SCR_WIDTH  = 1200;
-const unsigned int SCR_HEIGHT =  800;
+// define all the functions
+const Light* getAmbientLight(const Scene& scene);
+Color getTextureColor(const Scene& scene, const FaceIndex& f0, const FaceIndex& f1, const FaceIndex& f2,
+    float alpha, float beta, float gamma);
+bool isInShadow(const Scene& scene, const Vec3& origin, const Vec3& direction, float maxDistance);
+Color computeLighting(const Scene& scene, const Vec3& hitPoint, const Vec3& normal,
+    const Material& mat, const Ray& ray);
+Color computeReflection(const Scene& scene, const Ray& ray, const Vec3& hitPoint,
+    const Vec3& normal, const Material& mat, const Color& baseColor, int depth);
+bool intersectRayWithTriangle(const Vec3& o, const Vec3& d,
+    const Vec3& a, const Vec3& b, const Vec3& c,
+    float& t, float& beta, float& gamma);
+Vec3 computeColorTriangle(const Ray& ray, const Scene& scene, int depth);
+Vec2f computeInterpolatedUV(
+    const Scene& scene,
+    const FaceIndex& f0,
+    const FaceIndex& f1,
+    const FaceIndex& f2,
+    float beta,
+    float gamma);
 
-// FPS Counter
-float fpsTimer = 0.0f;
-int frameCount = 0;
 
-// 10x10 room
-const float ROOM_W = 10.0f;
-const float ROOM_H = 10.0f;
-
-bool dirOn = true;
-bool pOn[2] = { true, true };
-bool keyLatch[3] = { false, false, false };   // prevent multiple key presses 
-
-Camera camera;                      // start point (0,0,3)
-
-float lastX = SCR_WIDTH  / 2.0f; // Mouse position
-float lastY = SCR_HEIGHT / 2.0f; // Mouse position
-bool  firstMouse = true;
-
-float deltaTime = 0.0f; // Time between current frame and last frame
-float lastFrame = 0.0f;
-
-// --------------------------- prototypes
-void framebuffer_size_callback(GLFWwindow*, int, int);
-void mouse_callback(GLFWwindow*, double, double);
-void scroll_callback(GLFWwindow*, double, double);
-void processInput(GLFWwindow*);
-
-int glfwStartup()
+template <typename T>
+T myClamp(T value, T minVal, T maxVal)
 {
-     /* ---------------- GLFW / GLAD ------------- */
-    glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE,GLFW_OPENGL_CORE_PROFILE);
-
-    window =
-        glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT,
-                         "CSE461 - Programming Assignment 2",
-                         nullptr, nullptr);
-    if(!window){ std::cerr<<"Failed to create GLFW window\n"; return -1; }
-    glfwMakeContextCurrent(window);
-
-    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
-    glfwSetCursorPosCallback      (window, mouse_callback);
-    glfwSetScrollCallback         (window, scroll_callback);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
-    if(!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)){
-        std::cerr<<"Failed to init GLAD\n"; return -1; }
-    glEnable(GL_DEPTH_TEST);
-
-    return 0;
+    if (value < minVal) return minVal;
+    if (value > maxVal) return maxVal;
+    return value;
 }
 
-Object* createDynamicObject(const glm::vec3& pos, const glm::vec3& scale)
+struct TextureImage
 {
-    Object* obj = new Object();
-    obj->position = pos;
-    obj->scale = scale;
-    obj->updateBox();
-    DynamicObjects.push_back(obj);
-    return obj;
-}
+    unsigned char* data = nullptr;
+    int width, height, channels;
 
-Object* createStaticObject(const glm::vec3& pos, const glm::vec3& scale)
-{
-    Object* obj = new Object();
-    obj->position = pos;
-    obj->scale = scale;
-    obj->updateBox();
-    staticAllColliders.push_back(&obj->box); // cadd static colliders
-    return obj;
-}
-
-void DrawWalls(Shader& shader, unsigned int planeVAO, unsigned int texFloor) {
-    /* ---- floor ---- */
-    shader.setMat4("model", glm::mat4(1.0f));
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texFloor);
-    glBindVertexArray(planeVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    // Back wall (Z = -ROOM_W/2)
-    glm::mat4 back = glm::translate(glm::mat4(1.0f), glm::vec3(0, ROOM_H / 2 - 0.5f, -ROOM_W / 2 + 0.5f));
-    back = glm::rotate(back, glm::radians(90.f), glm::vec3(1, 0, 0));
-    shader.setMat4("model", back);
-    glBindVertexArray(planeVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    // Front wall (Z = +ROOM_W/2)
-    glm::mat4 front = glm::translate(glm::mat4(1.0f), glm::vec3(0, ROOM_H / 2 - 0.5f, ROOM_W / 2 - 0.5f));
-    front = glm::rotate(front, glm::radians(270.f), glm::vec3(1, 0, 0));
-    shader.setMat4("model", front);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    // Left wall (X = -ROOM_W/2)
-    glm::mat4 left = glm::translate(glm::mat4(1.0f), glm::vec3(-ROOM_W / 2 + 0.5f, ROOM_H / 2 - 0.5f, 0));
-    left = glm::rotate(left, glm::radians(270.f), glm::vec3(0, 0, 1));
-    shader.setMat4("model", left);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    // Right wall (X = +ROOM_W/2)
-    glm::mat4 right = glm::translate(glm::mat4(1.0f), glm::vec3(ROOM_W / 2 - 0.5f, ROOM_H / 2 - 0.5f, 0));
-    right = glm::rotate(right, glm::radians(90.f), glm::vec3(0, 0, 1));
-    shader.setMat4("model", right);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-}
-
-void drawCubes(Object* obj, Shader& shader, unsigned int cubeVAO, unsigned int texCube, bool isRotating = false, float t = 0.0f)
-{
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, obj->position);
-    model = glm::scale(model, obj->scale);
-    if(isRotating) {
-        model = glm::rotate(model, t*0.7f, glm::vec3(0.3f,1.0f,0.2f));
-    }
-    shader.setMat4("model", model);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texCube);
-    glBindVertexArray(cubeVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-}
-
-void renderDynamicObjects(Shader& shader, unsigned int cubeVAO, unsigned int texCube)
-{
-    for (Object* obj : DynamicObjects) 
+    // Returns the RGB float color of the (x,y) pixel
+    Color getColor(int x, int y) const
     {
-        glm::mat4 model = glm::mat4(1.0f);
-        model = glm::translate(model, obj->position);
-        model = glm::scale(model, obj->scale);
-        shader.setMat4("model", model);
+        // 1. Check if texture data is loaded
+        if (data == nullptr)
+        {
+            return Color(1, 0, 1); // Magenta → error color
+        }
+    
+        // 2. Clamp x and y to stay within valid range
+        x = myClamp(x, 0, width - 1);
+        y = myClamp(y, 0, height - 1);
+    
+        // 3. Compute the index in the data array
+        int index = (y * width + x) * channels;
+    
+        int dataLength = width * height * channels;
 
-        glBindVertexArray(cubeVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 36);
+        // 4. Check if index goes out of bounds
+        int maxIndex = width * height * channels;
+
+        if (index + 2 >= maxIndex)
+        {
+            return Color(1, 0, 1); // Error → return magenta
+        }
+    
+        // 5. Read RGB values and normalize them from 0–255 to 0–1
+        float r = data[index]     / 255.0f;
+        float g = data[index + 1] / 255.0f;
+        float b = data[index + 2] / 255.0f;
+
+        return Color(r, g, b);
     }
+};
+
+
+TextureImage textureData; // Global texture data
+
+Color computeAmbientComponent(const Light* ambientLight, const Material& mat)
+{
+    if (ambientLight == nullptr)
+        return Color(0.0f, 0.0f, 0.0f);
+
+    return Color(
+        mat.ambient.x * ambientLight->intensity.x / 255.0f,
+        mat.ambient.y * ambientLight->intensity.y / 255.0f,
+        mat.ambient.z * ambientLight->intensity.z / 255.0f
+    );
 }
 
-void drawSphere(Shader& shader, Object* sphere, unsigned int sphereVAO, unsigned int texSphere)
+Vec2f computeInterpolatedUV(
+    const Scene& scene,
+    const FaceIndex& f0,
+    const FaceIndex& f1,
+    const FaceIndex& f2,
+    float beta,
+    float gamma)
 {
-    shader.use();
+    // Alpha
+    float alpha = 1.0f - beta - gamma;
 
-    shader.setVec3("material.ambient",  glm::vec3(0.1f, 0.1f, 0.1f));
-    shader.setVec3("material.diffuse",  glm::vec3(0.8f, 0.8f, 0.8f));
-    shader.setVec3("material.specular", glm::vec3(0.7f, 0.7f, 0.7f));
-    shader.setFloat("material.shininess", 32.0f);
+    // UV koordinatlarını al
+    Vec2f uv0 = scene.textureData[f0.textureId];
+    Vec2f uv1 = scene.textureData[f1.textureId];
+    Vec2f uv2 = scene.textureData[f2.textureId];
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texSphere);
-
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, sphere->position);
-    model = glm::scale(model, glm::vec3(0.8f));
-
-    shader.setMat4("model", model);
-    glBindVertexArray(sphereVAO);
-    glDrawElements(GL_TRIANGLES, getSphereIndexCount(), GL_UNSIGNED_INT, 0);
+    // Barycentrik interpolasyon
+    return uv0 * alpha + uv1 * beta + uv2 * gamma;
 }
 
-void SetBlendShaderCommonUniforms(Shader& Shader, const glm::mat4& view, const glm::mat4& projection, const glm::vec3& viewPos) 
+// 1. Ambient light
+const Light* getAmbientLight(const Scene& scene) 
 {
-    Shader.use();
-    Shader.setMat4("view", view);
-    Shader.setMat4("projection", projection);
-    Shader.setVec3("viewPos", viewPos);
-}
-
-void SetLightUniforms(Shader& shader,
-                      const glm::vec3& dirDir,
-                      const glm::vec3& dirColor,
-                      bool dirOn,
-                      const glm::vec3 pointPos[2],
-                      const glm::vec3 pointColor[2],
-                      const bool pOn[2])
-{
-    shader.setVec3("dirLight.direction", dirDir);
-    shader.setVec3("dirLight.color",     (dirOn ? dirColor : glm::vec3(0.0f)));
-
-    for(int i = 0; i < 2; ++i)
+    for (const auto& light : scene.lights) 
     {
-        std::string base = "pointLights[" + std::to_string(i) + "].";
-        shader.setVec3(base + "position", pointPos[i]);
-        shader.setVec3(base + "color",    (pOn[i] ? pointColor[i] : glm::vec3(0.0f)));
+        if (light->type == LightType::AMBIENT) 
+        {
+            return light.get();
+        }
     }
+    return nullptr;
 }
 
-void drawPyramid(Shader& blendShader, unsigned int texCube, unsigned int texFloor, unsigned int pyramidVAO, Object* pyramid)
+// 2. UV interpolasyonu and texture color
+Color getTextureColor(const Scene& scene, Vec2f& uv) 
 {
-    // Textures for the blend
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texCube);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, texFloor);
+    // 4. (u, v)
+    int texX = static_cast<int>(uv.u * textureData.width);
+    int texY = static_cast<int>((1.0f - uv.v) * textureData.height);
+    // clamp (safety)
+    texX = myClamp(texX, 0, textureData.width - 1);
+    texY = myClamp(texY, 0, textureData.height - 1);
 
-    // Model matrix for the pyramid and draw call
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, pyramid->position);
-    model = glm::scale(model, pyramid->scale);
-    blendShader.setMat4("model", model);
-
-    glBindVertexArray(pyramidVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 18);
+    return textureData.getColor(texX, texY);
 }
 
-void SetMaterialUniforms(Shader& shader,
-                        const glm::vec3& ambient,
-                        const glm::vec3& diffuse,
-                        const glm::vec3& specular,
-                        float shininess)
-{
-    shader.setVec3("material.ambient",  ambient);
-    shader.setVec3("material.diffuse",  diffuse);
-    shader.setVec3("material.specular", specular);
-    shader.setFloat("material.shininess", shininess);
-}
-
-void fpsCounter()
-{
-    // FPS calculation
-    fpsTimer += deltaTime;
-    frameCount++;
-
-    if (fpsTimer >= 1.0f) {
-        std::cout << "FPS: " << frameCount << std::endl;
-        fpsTimer = 0.0f;
-        frameCount = 0;
+// 3. Shadow check
+bool isInShadow(const Scene& scene, const Vec3& origin, const Vec3& direction, float maxDistance) {
+    
+    Ray shadowRay(origin, direction);
+    
+    for (const auto& mesh : scene.objects.meshes) 
+    {
+        for (const auto& tri : mesh.faces) 
+        {
+            Vec3 a = scene.vertexData[tri[0].vertexId];
+            Vec3 b = scene.vertexData[tri[1].vertexId];
+            Vec3 c = scene.vertexData[tri[2].vertexId];
+            
+            float t, beta, gamma;
+            
+            if (intersectRayWithTriangle(shadowRay.getOrigin(), shadowRay.getDirection(), a, b, c, t, beta, gamma)) 
+            {
+                if (t > 1e-4f && t < maxDistance) return true;
+            }
+        }
     }
+    return false;
 }
+
+// 4. Calculate lighting
+Color computeLighting(const Scene& scene, const Vec3& hitPoint, const Vec3& normal,
+                      const Material& mat, const Ray& ray) 
+{
+    Color result(0, 0, 0.0);
+
+    Vec3 adjustedNormal = normal;
+
+    if (ray.getDirection().dot(normal) > 0) 
+    {
+        adjustedNormal = Vec3(-normal.x, -normal.y, -normal.z);
+    }
+        
+    for (const auto& lightPtr : scene.lights) 
+    {
+        if (lightPtr->type == LightType::AMBIENT) continue;
+
+        float lightDistance;
+        Vec3 lightDir;
+
+        if (lightPtr->type == LightType::POINT) 
+        {
+            auto* pl = static_cast<const PointLight*>(lightPtr.get());
+            lightDir = (pl->position - hitPoint);
+            lightDistance = lightDir.length();
+            lightDir = lightDir.normalized();
+        }
+        else if (lightPtr->type == LightType::TRIANGLE) 
+        {
+            auto* tl = static_cast<const TriangleLight*>(lightPtr.get());
+            Vec3 edge1 = tl->v1 - tl->v0;
+            Vec3 edge2 = tl->v2 - tl->v0;
+            lightDir = (edge1.cross(edge2).normalized()) * -1.0f;
+            lightDistance = 1e9f;
+
+            // auto* tl = static_cast<const TriangleLight*>(lightPtr.get());
+
+            // Vec3 edge1 = tl->v0 - tl->v1; // vertex1 - vertex2
+            // Vec3 edge2 = tl->v0 - tl->v2; // vertex1 - vertex3
+
+            // lightDir = (edge1.cross(edge2)).normalized();
+            // lightDir = lightDir * -1.0f; // light dir
+
+            // lightDistance = 1e9f; // infinite distance
+        } 
+        else 
+            continue;
+
+       if (isInShadow(scene, hitPoint + adjustedNormal * 0.001f, lightDir, lightDistance)) continue;
+
+        float diff = std::max(0.0f, adjustedNormal.dot(lightDir));
+        
+        Color diffuse(
+            mat.diffuse.x * lightPtr->intensity.x * diff / 255.0f,
+            mat.diffuse.y * lightPtr->intensity.y * diff / 255.0f,
+            mat.diffuse.z * lightPtr->intensity.z * diff / 255.0f
+        );
+
+        Vec3 viewDir = (ray.getOrigin() - hitPoint).normalized();
+        Vec3 halfDir = (viewDir + lightDir).normalized();
+        
+        float specAngle = std::max(0.0f, adjustedNormal.dot(halfDir));
+        float spec = pow(specAngle, mat.phongExponent);
+
+        Color specular(
+            mat.specular.x * lightPtr->intensity.x * spec / 255.0f,
+            mat.specular.y * lightPtr->intensity.y * spec / 255.0f,
+            mat.specular.z * lightPtr->intensity.z * spec / 255.0f
+        );
+        result += diffuse + specular;
+    }
+
+    
+    result = Color(
+        myClamp(result.getColorR(), 0.0f, 1.0f),
+        myClamp(result.getColorG(), 0.0f, 1.0f),
+        myClamp(result.getColorB(), 0.0f, 1.0f)
+    );
+    return result;
+}
+
+// 5. Reflection
+Color computeReflection(const Scene& scene, const Ray& ray, const Vec3& hitPoint,
+                        const Vec3& normal, const Material& mat, const Color& baseColor, int depth)
+{
+    Vec3 adjustedNormal = normal;
+
+    if (ray.getDirection().dot(adjustedNormal) > 0)
+        adjustedNormal = Vec3(-normal.x, -normal.y, -normal.z);
+
+    Vec3 wo = ray.getDirection() * -1.0f;
+    float dotProduct = adjustedNormal.dot(wo);
+    Vec3 reflectDir = Vec3(
+        -wo.x + 2.0f * adjustedNormal.x * dotProduct,
+        -wo.y + 2.0f * adjustedNormal.y * dotProduct,
+        -wo.z + 2.0f * adjustedNormal.z * dotProduct
+    );
+
+    Ray reflectedRay(
+        Vec3(
+            hitPoint.x + adjustedNormal.x * 0.001f,
+            hitPoint.y + adjustedNormal.y * 0.001f,
+            hitPoint.z + adjustedNormal.z * 0.001f
+        ),
+        reflectDir.normalized()
+    );
+
+    Vec3 reflectedColor = computeColorTriangle(reflectedRay, scene, depth - 1);
+
+    return Color(
+        baseColor.getColorR() * (1.0f - mat.mirrorReflectance.x) + reflectedColor.x * mat.mirrorReflectance.x,
+        baseColor.getColorG() * (1.0f - mat.mirrorReflectance.y) + reflectedColor.y * mat.mirrorReflectance.y,
+        baseColor.getColorB() * (1.0f - mat.mirrorReflectance.z) + reflectedColor.z * mat.mirrorReflectance.z
+    );
+}
+
+
+bool intersectRayWithTriangle(const Vec3& o, const Vec3& d,
+    const Vec3& a, const Vec3& b, const Vec3& c,
+    float& t, float& beta, float& gamma)
+{
+    Vec3 e1 = b - a;
+    Vec3 e2 = c - a;
+
+    Vec3 s = o - a;
+
+    // Matrisin columns:
+    // A = [ -d | e1 | e2 ] → 3x3 matrix
+    Vec3 col1 = d*-1; // -d
+    Vec3 col2 = e1;
+    Vec3 col3 = e2;
+
+    // det(A) → determinant calc: |A| = col1 · (col2 × col3)
+    float det = col1.dot(col2.cross(col3)); // cross product
+
+    // if determinant too close to zero, return false
+    if (fabs(det) < 1e-8) return false;
+
+    // inverse det
+    float invDet = 1.0f / det;
+
+    // Cramer’s Rule:
+    // t = |[s | e1 | e2]| / |A| = dot(s, (e1 × e2)) / det
+    float tVal = s.dot(col2.cross(col3)) * invDet; // t = |[s | e1 | e2]| / |A|
+
+    // β = |[-d | s | e2]| / |A| = dot(-d, (s × e2)) / det
+    // float betaVal = dot(col1, cross(s, col3)) * invDet;
+    float betaVal = col1.dot(s.cross(col3)) * invDet; // β = |[-d | s | e2]| / |A|
+
+    // γ = |[-d | e1 | s]| / |A| = dot(-d, (e1 × s)) / det
+    // float gammaVal = dot(col1, cross(col2, s)) * invDet;
+    float gammaVal = col1.dot(col2.cross(s)) * invDet; // γ = |[-d | e1 | s]| / |A|
+    // Barycentric conditions:
+    if (betaVal < 0 || gammaVal < 0 || (betaVal + gammaVal) > 1) return false;
+
+    // t < 0
+    if (tVal < 0) return false;
+
+    t = tVal;
+    beta = betaVal;
+    gamma = gammaVal;
+
+    return true;
+}
+
+Vec3 computeColorTriangle(const Ray& ray, const Scene& scene, int depth)
+{
+    Color resultColor(scene.backgroundColor.getColorR(), scene.backgroundColor.getColorG(), scene.backgroundColor.getColorB());
+    float minT = 1e9;
+
+    const Light* ambientLight = getAmbientLight(scene);
+
+    Vec3 hitPoint, normal;
+    Color textureColor;
+    float tFactor = 0.0f;
+    const Material* hitMaterial = nullptr;
+
+    FaceIndex f0, f1, f2;
+    float beta = 0, gamma = 0;
+
+    // --- Triangle intersection ---
+    for (const auto& mesh : scene.objects.meshes)
+    {
+        const Material& mat = scene.materials[mesh.materialId - 1];
+
+        for (const auto& triangle : mesh.faces)
+        {
+            FaceIndex tempF0 = triangle[0];
+            FaceIndex tempF1 = triangle[1];
+            FaceIndex tempF2 = triangle[2];
+
+            Vec3 a = scene.vertexData[tempF0.vertexId];
+            Vec3 b = scene.vertexData[tempF1.vertexId];
+            Vec3 c = scene.vertexData[tempF2.vertexId];
+
+            float t, tempBeta, tempGamma;
+
+            if (intersectRayWithTriangle(ray.getOrigin(), ray.getDirection(), a, b, c, t, tempBeta, tempGamma))
+            {
+                if (t < minT)
+                {
+                    minT = t;
+
+                    f0 = tempF0;
+                    f1 = tempF1;
+                    f2 = tempF2;
+                    beta = tempBeta;
+                    gamma = tempGamma;
+
+                    hitPoint = ray.getOrigin() + ray.getDirection() * t;
+                    normal = scene.normalData[f0.normalId].normalized();
+
+                    Vec2f uv = computeInterpolatedUV(scene, f0, f1, f2, beta, gamma);
+                    textureColor = getTextureColor(scene, uv);
+                    tFactor = mat.texturefactor;
+                    hitMaterial = &mat;
+                }
+            }
+        }
+    }
+
+    if (minT < 1e9)
+    {
+        Color finalColor = computeAmbientComponent(ambientLight, *hitMaterial);
+        finalColor += computeLighting(scene, hitPoint, normal, *hitMaterial, ray);
+
+        Color baseColor = finalColor * (1.0f - tFactor) + textureColor * tFactor;
+
+        Color reflectionComponent(0, 0, 0);
+
+        if (depth > 0 && (hitMaterial->mirrorReflectance.x > 0 || hitMaterial->mirrorReflectance.y > 0 || hitMaterial->mirrorReflectance.z > 0))
+        {
+            Vec3 normalAdjusted = normal;
+            if (ray.getDirection().dot(normalAdjusted) > 0)
+            {
+                normalAdjusted = Vec3(-normal.x, -normal.y, -normal.z);
+            }
+
+            Vec3 wo = ray.getDirection() * -1.0f;
+            float dotProduct = normalAdjusted.dot(wo);
+
+            Vec3 reflectDir = Vec3(
+                -wo.x + 2.0f * normalAdjusted.x * dotProduct,
+                -wo.y + 2.0f * normalAdjusted.y * dotProduct,
+                -wo.z + 2.0f * normalAdjusted.z * dotProduct
+            );
+
+            Ray reflectedRay(
+                Vec3(
+                    hitPoint.x + normalAdjusted.x * 0.001f,
+                    hitPoint.y + normalAdjusted.y * 0.001f,
+                    hitPoint.z + normalAdjusted.z * 0.001f
+                ),
+                reflectDir.normalized()
+            );
+
+            Vec3 reflectedColor = computeColorTriangle(reflectedRay, scene, depth - 1);
+
+            reflectionComponent = Color(
+                reflectedColor.x * hitMaterial->mirrorReflectance.x,
+                reflectedColor.y * hitMaterial->mirrorReflectance.y,
+                reflectedColor.z * hitMaterial->mirrorReflectance.z
+            );
+        }
+
+        Color finalCombined = baseColor + reflectionComponent;
+
+        resultColor = Color(
+            myClamp(finalCombined.getColorR(), 0.0f, 1.0f),
+            myClamp(finalCombined.getColorG(), 0.0f, 1.0f),
+            myClamp(finalCombined.getColorB(), 0.0f, 1.0f)
+        );
+    }
+
+    return Vec3(resultColor.getColorR(), resultColor.getColorG(), resultColor.getColorB());
+}
+
+
+void renderRow(int startRow, int endRow, Image& image, const Scene& scene)
+    {
+        int width = image.getWidth();
+        for (int i = startRow; i < endRow; ++i)
+        {
+            for (int j = 0; j < width; ++j)
+            {
+                Ray ray = scene.camera.getRay(j, i);
+                Vec3 rayColor = computeColorTriangle(ray, scene, scene.maxRayTraceDepth);
+                image.setPixel(j, i, Color(rayColor.x, rayColor.y, rayColor.z));
+            }
+        }
+    }
 
 int main()
 {
-   
-    glfwStartup();
-
-    /* ---------------- Assets ------------------- */
-    Shader shader("shaders/lit_tex.vs", "shaders/lit_tex.fs");
-    Shader blendShader("shaders/lit_tex.vs", "shaders/blend.fs");
-   
-    unsigned int texCube  = loadTexture("textures/indir.jpeg");
-    unsigned int texFloor = loadTexture("textures/my_texture_only_texture.png");
-    unsigned int texSphere   = loadTexture("textures/stars.jpg");
-
-    unsigned int cubeVAO   = getCubeVAO();
-    unsigned int planeVAO  = getPlaneVAO();
-    unsigned int sphereVAO = getSphereVAO();
-    unsigned int pyramidVAO= getPyramidVAO();
-
-    shader.use();
-    SetMaterialUniforms(shader, glm::vec3(0.1f, 0.1f, 0.1f), glm::vec3(1.0f, 0.5f, 0.3f),  glm::vec3(0.8f, 0.8f, 0.8f), 32.0f);                         // shininess
-    shader.setInt("diffuseMap", 0);   // one sampler
-
-    blendShader.use();
-    blendShader.setInt("texture1", 0);
-    blendShader.setInt("texture2", 1);
-
-    /* --- Light Def ------------------------ */
-    glm::vec3 dirDir   = glm::normalize(glm::vec3(-0.3f, -1.0f, -0.2f));
-    glm::vec3 dirColor = glm::vec3(1.0f, 0.95f, 0.9f);
-
-    glm::vec3 pointPos[2]   = { glm::vec3( 2,  2,  2),
-                                glm::vec3(-2,  1, -2) };
-    glm::vec3 pointColor[2] = { glm::vec3(1.0f,0.8f,0.6f),
-                                glm::vec3(0.4f,0.6f,1.0f) };
+    int width = 2000;
+    int height = 2000;
+    int i, j;
     
-    //Collider definitions
-    camera.SetColliders(staticAllColliders, DynamicObjects);
+    Scene scene = XMLParser::parseScene("scene.xml");
+    string fileName = "output.ppm";
 
-    /*----------------Objects---------------------------------- */
-    Object* movingCube = createDynamicObject(glm::vec3(3, 0.25f, -1), glm::vec3(0.3f));
+    Image image(scene.camera.getNx(), scene.camera.getNy());
+    ImageWriter imageWriter;
 
-    Object* mediumCube = createStaticObject(glm::vec3(-2, 0.5f, 2), glm::vec3(0.6f));
+    int originalChannels = 0;
+    textureData.data = stbi_load(scene.textureImageName.c_str(),
+                                &textureData.width,
+                                &textureData.height,
+                                &originalChannels,
+                                3);  // 3 kanal
 
-    Object* largeCube = createStaticObject(glm::vec3(1, 0.8f, -3), glm::vec3(1.5f));
-
-    Object* rotatingCube = createStaticObject(glm::vec3(0, 1, 0), glm::vec3(1.0f));
-
-    Object* sphere = createStaticObject(glm::vec3(-2, 0.5f, -2), glm::vec3(1.8f));
-
-    Object* pyramid = createStaticObject(glm::vec3(1,0,-2), glm::vec3(1.0f));
-
-    /* ---------------- Render Loop -------------- */
-    while(!glfwWindowShouldClose(window))
+    textureData.channels = 3;
+    if (textureData.data == nullptr)
     {
-        float t = glfwGetTime();
-        deltaTime = t - lastFrame;
-        lastFrame = t;
-
-        fpsCounter();
-
-    /* ----------  Keyboard Control ------------- */
-        auto edgeToggle = [&](int key, int idx, bool &flag){
-            if(glfwGetKey(window, key) == GLFW_PRESS){
-                if(!keyLatch[idx]) { flag = !flag; keyLatch[idx] = true; }
-            } else keyLatch[idx] = false;
-        };
-        edgeToggle(GLFW_KEY_1, 0, dirOn);   // 1 → directional
-        edgeToggle(GLFW_KEY_2, 1, pOn[0]);  // 2 → point-0
-        edgeToggle(GLFW_KEY_3, 2, pOn[1]);  // 3 → point-1
-    /* ------------------------------------------- */
-
-        processInput(window);
-
-        glClearColor(0.1f,0.15f,0.2f,1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        /* ---- view / proj ---- */
-        glm::mat4 view = camera.GetViewMatrix();
-        glm::mat4 proj = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH/SCR_HEIGHT, 0.1f, 100.0f);
-
-        SetBlendShaderCommonUniforms(shader, view, proj, camera.Position);
-        
-        SetLightUniforms(shader, dirDir, dirColor, dirOn, pointPos, pointColor, pOn);
-        
-        SetMaterialUniforms(shader,
-                            glm::vec3(0.2f, 0.2f, 0.2f),    // Ambient
-                            glm::vec3(0.8f, 0.8f, 0.8f),    // Diffuse
-                            glm::vec3(0.1f, 0.1f, 0.1f),    // Specular
-                            8.0f);                          // Shininess
-        DrawWalls(shader, planeVAO, texFloor);
-
-        // red bright
-        SetMaterialUniforms(shader,
-                            glm::vec3(0.17f, 0.02f, 0.02f), // Ambient
-                            glm::vec3(0.6f, 0.07f, 0.07f),  // Diffuse
-                            glm::vec3(0.7f, 0.6f, 0.6f),    // Specular
-                            76.8f);                         // Shininess
-        drawCubes(rotatingCube, shader, cubeVAO, texCube, true, t);
-
-         // blue
-        SetMaterialUniforms(shader,
-                            glm::vec3(0.0f, 0.05f, 0.1f),   // Ambient
-                            glm::vec3(0.1f, 0.3f, 0.7f),    // Diffuse
-                            glm::vec3(0.1f, 0.1f, 0.2f),    // Specular
-                            10.0f);                         // Shininess
-        drawCubes(movingCube, shader, cubeVAO, texCube, false, t);     
-        
-        // green metallic non-bright
-        SetMaterialUniforms(shader,
-                            glm::vec3(0.02f, 0.1f, 0.02f),  // Ambient
-                            glm::vec3(0.2f, 0.5f, 0.2f),    // Diffuse
-                            glm::vec3(0.6f, 0.8f, 0.6f),    // Specular
-                            100.0f);                        // Shininess
-        drawCubes(mediumCube, shader, cubeVAO, texCube, false, t);
-
-        SetMaterialUniforms(shader,
-                            glm::vec3(0.1f, 0.1f, 0.1f),    // Ambient
-                            glm::vec3(1.0f, 0.5f, 0.3f),    // Diffuse (orange)
-                            glm::vec3(0.1f, 0.1f, 0.1f),    // Specular
-                            64.0f);                         // Shininess
-        drawCubes(largeCube, shader, cubeVAO, texCube, false, t);
-
-        renderDynamicObjects(shader, cubeVAO, texCube);
-        
-        drawSphere(shader, sphere, sphereVAO, texSphere);
-
-        SetBlendShaderCommonUniforms(blendShader, view, proj, camera.Position);
-        SetLightUniforms(blendShader, dirDir, dirColor, dirOn, pointPos, pointColor, pOn);
-
-        drawPyramid(blendShader, texCube, texFloor, pyramidVAO, pyramid);
-
-        glfwSwapBuffers(window);
-        glfwPollEvents();
+        std::cerr << "Texture loading failed!" << std::endl;
+        exit(1);
     }
 
-    glfwTerminate();
+    // Fill the image with a black color
+    for(i = 0; i < height; i++)
+    {
+        for(j = 0; j < width; j++)
+        {
+            image.setPixel(i, j, scene.backgroundColor);
+        }
+    }
+
+    int threadCount = std::thread::hardware_concurrency();
+    vector<std::thread> threads;
+
+    int rowsPerThread = height / threadCount;
+    auto start = std::chrono::high_resolution_clock::now();
+    //number of thread
+    std::cout << "Number of threads: " << threadCount << std::endl;
+    for (int t = 0; t < threadCount; ++t)
+    {
+        int startRow = t * rowsPerThread;
+        int endRow = (t == threadCount - 1) ? height : (t + 1) * rowsPerThread;
+
+        threads.emplace_back(renderRow, startRow, endRow, std::ref(image), std::cref(scene));
+    }
+
+    // Thread'lerin bitmesini bekle
+    for (auto& th : threads)
+    {
+        th.join();
+    }
+
+    imageWriter.writePPM(fileName.c_str(), image); // convert string to const char*
+
+    std::cout << "Image written to " << fileName << std::endl;
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end - start;
+    std::cout << "Render time: " << duration.count() << " seconds" << std::endl;
     return 0;
-}
-
-/* -------------- callbacks & input -------------- */
-void framebuffer_size_callback(GLFWwindow*, int w, int h)
-{
-    glViewport(0, 0, w, h);
-}
-
-void mouse_callback(GLFWwindow*, double xposIn, double yposIn)
-{
-    float xpos = static_cast<float>(xposIn);
-    float ypos = static_cast<float>(yposIn);
-    if(firstMouse){ lastX = xpos; lastY = ypos; firstMouse = false; }
-    float xoff = xpos - lastX;
-    float yoff = lastY - ypos;   // y axis is inverted in OpenGL
-    lastX = xpos; lastY = ypos;
-    camera.ProcessMouseMovement(xoff, yoff);
-}
-
-void scroll_callback(GLFWwindow*, double, double yoffset)
-{
-    camera.ProcessMouseScroll(static_cast<float>(yoffset));
-}
-
-void processInput(GLFWwindow* window)
-{
-    if(glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, true);
-
-    if(glfwGetKey(window, GLFW_KEY_W)==GLFW_PRESS) camera.ProcessKeyboard(FORWARD , deltaTime);
-    if(glfwGetKey(window, GLFW_KEY_S)==GLFW_PRESS) camera.ProcessKeyboard(BACKWARD, deltaTime);
-    if(glfwGetKey(window, GLFW_KEY_A)==GLFW_PRESS) camera.ProcessKeyboard(LEFT    , deltaTime);
-    if(glfwGetKey(window, GLFW_KEY_D)==GLFW_PRESS) camera.ProcessKeyboard(RIGHT   , deltaTime);
 }
